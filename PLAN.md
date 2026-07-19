@@ -41,7 +41,7 @@ it becomes a measured bottleneck at scale.
 User
   id, googleId, email, name, avatarUrl, createdAt
   linkedPersonId (nullable, unique)   // which Person node is "me"
-  isFounder (bool)                    // fallback approver for orphaned join requests
+  role (MEMBER | ADMIN | FOUNDER)     // ADMIN/FOUNDER = fallback approvers + moderation authority
 
 Person                                 // ONE global table — not scoped to a family
   id, firstName, lastName, maidenName, gender,
@@ -72,11 +72,16 @@ Report                                 // abuse/vandalism/incorrect-info flaggin
 
 MembershipRequest                      // gate between "authenticated" and "trusted member"
   id, requesterUserId,
-  claimedPersonId (nullable),          // claiming an existing unclaimed node
-  newPersonDraft (JSON, nullable),     // proposing a brand-new person
+  requestType (NEW_PERSON | CLAIM_EXISTING),
+  claimedPersonId (nullable),          // set when requestType = CLAIM_EXISTING
+  newPersonDraft (JSON, nullable),     // set when requestType = NEW_PERSON
   anchorPersonId, relationshipType,
+  requiredApprovals (int),             // 1 for NEW_PERSON, 2 for CLAIM_EXISTING
   status (PENDING | APPROVED | REJECTED),
-  approverUserId, resolvedAt, createdAt
+  createdAt, resolvedAt
+
+MembershipApproval                     // one row per approver on a request
+  id, requestId, approverUserId, approvedAt
 
 Media
   id, personId, url, caption, uploadedBy, uploadedAt
@@ -123,29 +128,40 @@ join flow**, approved by whichever existing member is closest to the claim, not 
 central gatekeeper for the whole graph:
 
 1. **Authenticate**: Google sign-in creates a `User` with no tree access yet.
-2. **Request to join**: onboarding asks the new user to either claim an existing
-   unclaimed `Person` node (someone already listed them), or propose themselves as a
-   new `Person` connected by a relationship to an existing anchor person (e.g. "I'm
-   the child of John Doe"). This creates a `MembershipRequest`.
-3. **Route the approval** — delegated, not centralized:
-   - If the anchor person already has a linked, active member, **that member
-     approves** — the person best placed to confirm the claim is real.
-   - If the anchor person has no linked member yet (e.g. deceased, or hasn't joined),
-     it falls to whoever currently manages that branch (anyone with that `Person` in
-     their visible/edit radius).
-   - If no one can be found (orphan branch, first request ever), it falls to the
-     **founder** (`User.isFounder`) — the original seed member acts as the permanent
-     fallback approver, not the default path.
-4. **On approval**: the `Person` node/edge is created or confirmed, `User.linkedPersonId`
-   is set, and the approval is logged as a `Revision` (approver recorded as the
-   vouching party). The new member's own 5-generation visibility now computes from
-   their newly linked node.
-5. **On rejection**: requester is notified and can appeal to the founder.
+2. **Request to join** — two request types with different stakes:
+   - **`NEW_PERSON`**: "I'm not in the tree yet; I'm the child/spouse/etc. of anchor
+     person X." Lower risk — it's an addition, not a takeover. **1 approval required.**
+   - **`CLAIM_EXISTING`**: "This existing `Person` node someone else already added
+     *is me*." Higher risk — that node may already carry data (photos, bio, edges)
+     other people contributed, so a false claim is effectively identity takeover of
+     an existing record. **2 independent approvals required**, from two different
+     already-linked members connected to that person (not just one relative) — or a
+     single ADMIN/FOUNDER override.
+3. **Route the approval(s)** — delegated, not centralized:
+   - If the anchor/claimed person already has linked, active member(s) among their
+     close relatives, those members are asked to approve — the people best placed to
+     confirm the claim is real.
+   - If no linked member can be found for that branch (deceased anchor, nobody's
+     joined yet), it falls to whoever currently manages that branch (anyone with that
+     `Person` in their visible/edit radius).
+   - If still no one can be found (orphan branch, first request ever), it falls to an
+     **ADMIN or FOUNDER** (`User.role`).
+4. **On approval** (once `requiredApprovals` is met): the `Person` node/edge is
+   created or confirmed, `User.linkedPersonId` is set, and every approval is logged
+   as a `Revision` (each approver recorded as a vouching party). The new member's own
+   5-generation visibility now computes from their newly linked node.
+5. **On rejection**: requester is notified and can appeal to an admin/founder.
 
-Routing approval to the *nearest verified relative* rather than one central admin
-avoids a bottleneck as the tree grows, while still requiring a real, already-trusted
-person to vouch for every new connection — the core safeguard against identity fraud
-(someone falsely claiming to be a specific living relative).
+**Admin delegation**: the founder isn't a permanent single point of failure — a
+founder can promote trusted members to `ADMIN`, who then share fallback-approval and
+moderation authority. Promotions/demotions are themselves logged as `Revision`s
+(entityType `USER`) for auditability, same as any other sensitive action in the app.
+
+Routing approval to the *nearest verified relatives* rather than one central admin
+avoids a bottleneck as the tree grows, while requiring real, already-trusted people to
+vouch for every new connection — and requiring two of them specifically when someone
+is claiming to *be* an already-documented person, since that's a stronger, riskier
+claim than simply being added as a new relative.
 
 ## 6. Editing Model
 
@@ -165,7 +181,7 @@ relationship they can currently see.
   `Report` flow from day one and a lightweight moderation queue (e.g. auto-flag mass
   deletions or edits to many people in a short window).
 
-## 7. Legal / Policy Considerations (real, not optional, for an open public platform)
+## 7. Legal / Policy Considerations & Privacy Risk Register
 
 Because this now involves data about real people — including living people who never
 signed up — plan for:
@@ -179,6 +195,28 @@ signed up — plan for:
 - Decide early whether registration is fully open at launch or gated behind an
   invite/waitlist while moderation tooling matures — open-with-no-moderation is the
   highest-risk configuration.
+
+### Privacy risk register
+
+The thing that makes this app's privacy posture different from a normal app: **most
+of the people whose data lives in it never signed up and never agreed to anything.**
+Relatives get added by other relatives. That single fact drives most of the risk
+below.
+
+| Risk | Why it applies here | Mitigation already in plan / needed |
+|---|---|---|
+| **Non-consenting data subjects** | Most `Person` records belong to people who never created an account or agreed to a ToS — you're a de facto data controller for people who aren't your users. | Restricted-by-default living-person privacy (§4); public takedown/opt-out process; privacy policy that addresses non-users explicitly, not just registered members. |
+| **Sensitive inferences from relationship structure alone** | Family-graph data can reveal adoption status, same-sex partnerships (sexual orientation — a GDPR "special category"), estrangement, or non-paternity events, even without anyone stating them directly. | Treat `Union.type`, adoption `ParentChild.type`, and any free-text `bio` as sensitive-by-default, not just birthdate/photo. |
+| **Minors' data** | Relatives will enter names/photos/birthdates of children who can't consent themselves. | Name + relationship only for minors by default; no photos/bios; minors not `CLAIM_EXISTING`-able until they can consent. |
+| **Verification-data creep** | The new 2-approval flow for `CLAIM_EXISTING` solves identity risk *without* documents — resist the temptation to "just ask for an ID photo" later; ID/biometric verification is a much higher liability tier (e.g. Illinois BIPA carries statutory damages per violation). | Keep verification social (multi-approver), not document- or biometric-based. |
+| **Cross-border data transfer** | If any relative lives outside the US, their data sits on US infrastructure — GDPR (and similar laws) applies based on the *data subject's* location, not yours. | No EU legal entity needed at hobby scale, but honor access/delete requests promptly and say so in the privacy policy. |
+| **Breach exposure & notification** | A breach here leaks names, birthdates, relationships, and photos of possibly thousands of people — many with no contact info on file, making legally-required breach notification hard. | Encrypt at rest, least-privilege DB access, private-by-default photo storage, don't collect anything beyond what the tree needs (no IDs/SSNs). |
+| **Family-social harm (not just legal)** | Even where nothing is illegal, exposing biological parentage, estrangement, or a living person's location via listed relatives can cause real harm. | Restricted defaults + no indexing solve most of this; the takedown process is the backstop. |
+| **Founder/admin power itself** | Founders/admins (§5) end up with override access to identity disputes and effectively see sensitive family facts others don't. | Log every promotion, approval, and override as a `Revision` so admin power is auditable, not just member edits. |
+
+Practically: none of this needs a lawyer at Phase 0–2 (private beta, a handful of
+relatives) — it needs to be *designed for* now so it isn't a scramble at Phase 3
+(§10), which is exactly why it's already gating that phase's exit criteria.
 
 ## 8. Core Features
 
@@ -237,6 +275,5 @@ incident. Each phase has an exit criterion — not just a feature list.
 | **5. Enrichment (v2)** | Photos, search, GEDCOM import/export, configurable visibility radius | — |
 
 ## 11. Open Questions
-- Should "claiming" an existing profile someone else created require any verification beyond nearest-relative approval, or is that approval enough for v1?
-- Should founder approval authority ever transfer/delegate to additional permanent admins as the tree grows, to avoid a single point of failure?
 - Any existing data source to seed the graph (a family GEDCOM export, spreadsheet)?
+- Who should hold `FOUNDER`/`ADMIN` role at launch besides you, if anyone?
