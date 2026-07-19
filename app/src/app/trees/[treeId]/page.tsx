@@ -2,6 +2,10 @@ import Link from "next/link";
 import { requireUser, assertTreeMember } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { createInvite } from "@/app/actions/invites";
+import { createPerson } from "@/app/actions/people";
+import { createParentChild, createUnion } from "@/app/actions/relationships";
+import { buildFamilyForest, personLabel } from "@/lib/family-tree";
+import { FamilyTreeView } from "./FamilyTreeView";
 
 export default async function TreePage({
   params,
@@ -23,6 +27,14 @@ export default async function TreePage({
       ? await prisma.invite.findMany({ where: { treeId, status: "PENDING" } })
       : [];
 
+  const [people, parentChildren, unions] = await Promise.all([
+    prisma.person.findMany({ where: { treeId }, orderBy: { createdAt: "asc" } }),
+    prisma.parentChild.findMany({ where: { treeId } }),
+    prisma.union.findMany({ where: { treeId } }),
+  ]);
+
+  const forest = buildFamilyForest(people, parentChildren, unions);
+
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-4 sm:gap-8 sm:p-8">
       <div>
@@ -39,7 +51,191 @@ export default async function TreePage({
       </div>
 
       <section>
-        <h2 className="mb-3 font-medium">Members</h2>
+        <h2 className="mb-3 font-medium">Family tree</h2>
+        <div className="overflow-x-auto rounded-md border border-gray-200 p-4">
+          <FamilyTreeView roots={forest} />
+        </div>
+      </section>
+
+      <section className="rounded-md border border-gray-200 p-4">
+        <h2 className="mb-3 font-medium">Add a person</h2>
+        <form action={createPerson.bind(null, treeId)} className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              name="firstName"
+              required
+              placeholder="First name"
+              className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+            />
+            <input
+              name="lastName"
+              placeholder="Last name"
+              className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+            />
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <select
+              name="gender"
+              defaultValue="UNKNOWN"
+              className="min-h-11 rounded-md border border-gray-300 px-3 py-2 text-base"
+            >
+              <option value="UNKNOWN">Gender unknown</option>
+              <option value="FEMALE">Female</option>
+              <option value="MALE">Male</option>
+              <option value="OTHER">Other</option>
+            </select>
+            <label className="flex min-h-11 items-center gap-2 text-sm text-gray-600">
+              <input type="checkbox" name="isLiving" defaultChecked />
+              Living
+            </label>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <label className="flex-1 text-sm text-gray-600">
+              Birth date
+              <input
+                type="date"
+                name="birthDate"
+                className="mt-1 min-h-11 w-full rounded-md border border-gray-300 px-3 py-2 text-base"
+              />
+            </label>
+            <label className="flex-1 text-sm text-gray-600">
+              Death date
+              <input
+                type="date"
+                name="deathDate"
+                className="mt-1 min-h-11 w-full rounded-md border border-gray-300 px-3 py-2 text-base"
+              />
+            </label>
+          </div>
+          <button
+            type="submit"
+            className="min-h-11 self-start rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800 active:bg-gray-900"
+          >
+            Add person
+          </button>
+        </form>
+      </section>
+
+      {people.length >= 2 && (
+        <section className="rounded-md border border-gray-200 p-4">
+          <h2 className="mb-3 font-medium">Add a relationship</h2>
+
+          <form
+            action={createParentChild.bind(null, treeId)}
+            className="mb-4 flex flex-col gap-2"
+          >
+            <p className="text-sm text-gray-600">Parent → child</p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <select
+                name="parentId"
+                required
+                defaultValue=""
+                className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="" disabled>
+                  Parent
+                </option>
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {personLabel(p)}
+                  </option>
+                ))}
+              </select>
+              <select
+                name="childId"
+                required
+                defaultValue=""
+                className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="" disabled>
+                  Child
+                </option>
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {personLabel(p)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                name="type"
+                defaultValue="BIOLOGICAL"
+                className="min-h-11 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="BIOLOGICAL">Biological</option>
+                <option value="ADOPTED">Adopted</option>
+                <option value="STEP">Step</option>
+                <option value="FOSTER">Foster</option>
+              </select>
+              <button
+                type="submit"
+                className="min-h-11 rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800 active:bg-gray-900"
+              >
+                Link parent/child
+              </button>
+            </div>
+          </form>
+
+          <form
+            action={createUnion.bind(null, treeId)}
+            className="flex flex-col gap-2"
+          >
+            <p className="text-sm text-gray-600">Spouses / partners</p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <select
+                name="person1Id"
+                required
+                defaultValue=""
+                className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="" disabled>
+                  Person
+                </option>
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {personLabel(p)}
+                  </option>
+                ))}
+              </select>
+              <select
+                name="person2Id"
+                required
+                defaultValue=""
+                className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="" disabled>
+                  Partner
+                </option>
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {personLabel(p)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                name="type"
+                defaultValue="MARRIAGE"
+                className="min-h-11 rounded-md border border-gray-300 px-3 py-2 text-base"
+              >
+                <option value="MARRIAGE">Marriage</option>
+                <option value="PARTNERSHIP">Partnership</option>
+              </select>
+              <button
+                type="submit"
+                className="min-h-11 rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800 active:bg-gray-900"
+              >
+                Link spouses/partners
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      <section>
+        <h2 className="mb-3 font-medium">App members (account access)</h2>
         <ul className="flex flex-col gap-2">
           {members.map((m) => (
             <li
@@ -91,11 +287,6 @@ export default async function TreePage({
           )}
         </section>
       )}
-
-      <section className="rounded-md border border-dashed border-gray-300 p-4 text-sm text-gray-500">
-        Adding people and relationships is next (Phase 1 — see
-        docs/USER_STORIES.md Epics 6–7).
-      </section>
     </main>
   );
 }
