@@ -48,6 +48,9 @@ Person                                  // scoped to one tree — not shared glo
   id, treeId, firstName, lastName, maidenName, gender,
   birthDate, deathDate, birthPlace, isLiving (bool),
   bio, photoUrl, createdBy, createdAt, updatedAt
+  sensitiveDetailsVisible (bool, default false)  // gates photo + full name + DOB together, see §7
+  consentGrantedBy (userId, nullable)            // self, if linked; else the proxy who granted it
+  consentGrantedAt (nullable)
 
 ParentChild                             // directed edge: parent -> child, within a tree
   id, treeId, parentId, childId, type (BIOLOGICAL | ADOPTED | STEP | FOSTER),
@@ -120,6 +123,10 @@ branches — is worth keeping as a **UI convenience** for large trees, not as an
 control mechanism: it's just a client-side filter over data the member can already
 see in full.
 
+"Seeing the whole tree" means the tree's *structure* (who's connected to whom) and
+non-sensitive fields. Photos, full names, and dates of birth are a separate,
+field-level layer gated by consent regardless of tree membership — see §7.
+
 ## 6. Editing Model
 
 Any `MEMBER` (not just admins) can add/edit people and relationships in a tree they
@@ -143,10 +150,29 @@ Much lighter than the "public platform" version of this plan, because access is 
 bounded to an invited group per tree rather than the open internet — but it's still
 real people's data, some of it entered by someone other than the person themselves:
 
-- **Living people**: keep an `isLiving` flag; consider letting a person hide their
-  own bio/photo once they've claimed their profile, even from other tree members.
-- **Minors**: default to name + relationship only; skip photos/detailed bios unless
-  a parent/guardian in the tree explicitly adds them.
+### Default-hidden sensitive fields (photo, full name, date of birth)
+
+Per your direction, these three fields are **hidden by default for everyone** and
+only revealed once consent is explicitly granted — `Person.sensitiveDetailsVisible`
+starts `false` for every new profile, regardless of who added it.
+
+| Case | Who can grant consent | Notes |
+|---|---|---|
+| Person has a linked account (`TreeMember.linkedPersonId`) | **Only that person, themselves** | No one else — not even an admin — can toggle it on their behalf. This is the core protection: a living relative controls their own exposure once they've joined. |
+| Person is **deceased** and has no linked account | The person who added them (`Person.createdBy`), or any tree `ADMIN` | Practical exception, since a deceased person can never self-consent. Deceased ancestors are the core historical data a tree exists to preserve. |
+| Person is **living** and has no linked account yet | **No one** — stays masked | Deliberately no proxy consent here: a living person who hasn't joined yet could still join later and decide for themselves. Letting a relative reveal their photo/DOB on their behalf would defeat the purpose. |
+
+**What's shown while masked**: first name only, tree position/relationships, and
+`isLiving` status — enough to navigate the tree structure without exposing the
+gated fields. Photo shows a placeholder avatar; last name, maiden name, and exact
+birth date are omitted entirely (not even birth year) until consent is granted.
+
+**Revoking consent**: same actors who can grant it can revoke it at any time
+(self, for a linked person; adder/admin, for a deceased one); the fields immediately
+mask again.
+
+- **Minors**: default to name + relationship only regardless of the above; skip
+  photos/detailed bios even if a parent/guardian adds them.
 - **Verification stays social, not document-based**: the 2-approver `CLAIM_EXISTING`
   flow (§4) is enough — avoid ever asking for ID uploads or biometric verification,
   which would introduce disproportionate liability (e.g. biometric privacy laws with
@@ -165,6 +191,8 @@ real people's data, some of it entered by someone other than the person themselv
 - Create a tree (become its founder) or join one via invite/request
 - Add/edit people and `ParentChild`/`Union` relationships within a tree
 - Full-tree visualization
+- **Consent gating for photo/full name/DOB** (§7) — masked by default, self- or
+  proxy-consent to reveal
 - Revision history + revert on every profile
 - Admin delegation (founder → admins) per tree
 
@@ -202,7 +230,7 @@ Vercel deployment
 | Phase | Goal | Exit criteria |
 |---|---|---|
 | **0. Walking skeleton** | Prove auth + tree creation + membership scoping work end-to-end | Create a tree, invite a second Google account, confirm they only see that tree's data |
-| **1. Core data entry** | Build out a real tree with real relatives | People/relationships added, tree visualization renders correctly, revisions logged |
+| **1. Core data entry** | Build out a real tree with real relatives, sensitive fields masked by default | People/relationships added, tree visualization renders correctly, revisions logged, photo/full name/DOB stay masked until self- or proxy-consent is granted per the §7 rule |
 | **2. Trust & safety (lightweight)** | Handle the small-scale versions of open editing | Revert a bad edit, merge a duplicate person, promote an admin — all through the UI |
 | **3. Privacy pass** | Cover the essentials before inviting people outside your immediate circle | Privacy policy exists; living-person hide option and leave-tree/takedown action work |
 | **4. Multi-tree rollout** | Let other people create their own independent trees using the app | A second, unrelated tree can be created and used with zero interaction with the first |
