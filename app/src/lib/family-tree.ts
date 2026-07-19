@@ -112,3 +112,97 @@ export function personLabel(p: TreePerson): string {
 
   return label;
 }
+
+export interface OrgChartBox {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  label: string;
+}
+
+export interface OrgChartEdge {
+  id: string;
+  path: string;
+}
+
+export interface OrgChartLayout {
+  boxes: OrgChartBox[];
+  edges: OrgChartEdge[];
+  width: number;
+  height: number;
+}
+
+const BOX_HEIGHT = 56;
+const ROW_HEIGHT = 130;
+const SLOT_WIDTH = 190;
+const PADDING = 24;
+const COUPLE_WIDTH = SLOT_WIDTH * 1.35;
+const SINGLE_WIDTH = SLOT_WIDTH * 0.85;
+
+/**
+ * Lays out a family forest as an org-chart: one horizontal row per
+ * generation, couples sharing a box, parent-to-child elbow connectors.
+ * Simple midpoint tree layout (not full Reingold-Tilford) -- fine for the
+ * branching factors a family tree actually has.
+ */
+export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
+  let cursor = 0;
+  let maxDepth = 0;
+  const centers = new Map<string, { x: number; depth: number; node: FamilyTreeNode }>();
+
+  function unitWidth(node: FamilyTreeNode) {
+    return node.spouses.length > 0 ? 1.5 : 1;
+  }
+
+  function visit(node: FamilyTreeNode, depth: number): number {
+    maxDepth = Math.max(maxDepth, depth);
+    let x: number;
+    if (node.children.length === 0) {
+      const w = unitWidth(node);
+      x = cursor + w / 2;
+      cursor += w;
+    } else {
+      const childXs = node.children.map((c) => visit(c, depth + 1));
+      x = (Math.min(...childXs) + Math.max(...childXs)) / 2;
+    }
+    centers.set(node.person.id, { x, depth, node });
+    return x;
+  }
+
+  for (const root of roots) visit(root, 0);
+
+  const boxes: OrgChartBox[] = [];
+  const edges: OrgChartEdge[] = [];
+
+  for (const { x, depth, node } of centers.values()) {
+    const width = node.spouses.length > 0 ? COUPLE_WIDTH : SINGLE_WIDTH;
+    const boxX = PADDING + x * SLOT_WIDTH - width / 2;
+    const boxY = PADDING + depth * ROW_HEIGHT;
+    const label = [personLabel(node.person), ...node.spouses.map(personLabel)].join(
+      " ⚭ ",
+    );
+    boxes.push({ id: node.person.id, x: boxX, y: boxY, width, height: BOX_HEIGHT, label });
+
+    const parentCenterX = PADDING + x * SLOT_WIDTH;
+    const parentBottomY = boxY + BOX_HEIGHT;
+
+    for (const child of node.children) {
+      const childInfo = centers.get(child.person.id);
+      if (!childInfo) continue;
+      const childCenterX = PADDING + childInfo.x * SLOT_WIDTH;
+      const childTopY = PADDING + childInfo.depth * ROW_HEIGHT;
+      const midY = (parentBottomY + childTopY) / 2;
+      edges.push({
+        id: `${node.person.id}-${child.person.id}`,
+        path: `M ${parentCenterX} ${parentBottomY} V ${midY} H ${childCenterX} V ${childTopY}`,
+      });
+    }
+  }
+
+  const width = PADDING * 2 + Math.max(cursor, 1) * SLOT_WIDTH;
+  const height = PADDING * 2 + maxDepth * ROW_HEIGHT + BOX_HEIGHT;
+
+  return { boxes, edges, width, height };
+}

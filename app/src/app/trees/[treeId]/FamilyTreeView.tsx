@@ -1,25 +1,4 @@
-import { type FamilyTreeNode, personLabel } from "@/lib/family-tree";
-
-function NodeView({ node }: { node: FamilyTreeNode }) {
-  const label = [personLabel(node.person), ...node.spouses.map(personLabel)].join(
-    " ⚭ ",
-  );
-
-  return (
-    <li>
-      <div className="inline-block rounded-md border border-gray-200 px-3 py-1.5 text-sm">
-        {label}
-      </div>
-      {node.children.length > 0 && (
-        <ul className="mt-2 flex flex-col gap-2 border-l border-gray-200 pl-4">
-          {node.children.map((child) => (
-            <NodeView key={child.person.id} node={child} />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
+import { type FamilyTreeNode, layoutOrgChart } from "@/lib/family-tree";
 
 export function FamilyTreeView({ roots }: { roots: FamilyTreeNode[] }) {
   if (roots.length === 0) {
@@ -30,11 +9,45 @@ export function FamilyTreeView({ roots }: { roots: FamilyTreeNode[] }) {
     );
   }
 
+  const { boxes, edges, width, height } = layoutOrgChart(roots);
+
   return (
-    <ul className="flex flex-col gap-3">
-      {roots.map((root) => (
-        <NodeView key={root.person.id} node={root} />
+    <svg
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label="Family tree organizational chart"
+      className="block"
+    >
+      {edges.map((edge) => (
+        <path
+          key={edge.id}
+          d={edge.path}
+          fill="none"
+          stroke="#d1d5db"
+          strokeWidth={2}
+        />
       ))}
-    </ul>
+      {boxes.map((box) => (
+        <g key={box.id}>
+          <rect
+            x={box.x}
+            y={box.y}
+            width={box.width}
+            height={box.height}
+            rx={8}
+            fill="white"
+            stroke="#d1d5db"
+            strokeWidth={1.5}
+          />
+          <foreignObject x={box.x} y={box.y} width={box.width} height={box.height}>
+            <div className="flex h-full w-full items-center justify-center px-2 text-center text-xs leading-tight text-gray-900">
+              {box.label}
+            </div>
+          </foreignObject>
+        </g>
+      ))}
+    </svg>
   );
 }
