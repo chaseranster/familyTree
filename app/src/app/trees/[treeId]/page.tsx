@@ -24,12 +24,17 @@ export default async function TreePage({
       : [];
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 p-8">
+    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-4 sm:gap-8 sm:p-8">
       <div>
-        <Link href="/dashboard" className="text-sm text-gray-500 hover:underline">
+        <Link
+          href="/dashboard"
+          className="inline-block py-1 text-sm text-gray-500 hover:underline"
+        >
           ← Your trees
         </Link>
-        <h1 className="text-2xl font-semibold">{tree.name}</h1>
+        <h1 className="text-xl font-semibold break-words sm:text-2xl">
+          {tree.name}
+        </h1>
         <p className="text-sm text-gray-500">Your role: {membership.role}</p>
       </div>
 
@@ -41,7 +46,10 @@ export default async function TreePage({
               key={m.id}
               className="rounded-md border border-gray-200 px-4 py-2 text-sm"
             >
-              {m.user.name} ({m.user.email}) — {m.role}
+              <div className="font-medium">{m.user.name}</div>
+              <div className="break-all text-gray-500">
+                {m.user.email} — {m.role}
+              </div>
             </li>
           ))}
         </ul>
@@ -52,18 +60,18 @@ export default async function TreePage({
           <h2 className="mb-3 font-medium">Invite a relative</h2>
           <form
             action={createInvite.bind(null, treeId)}
-            className="flex gap-2"
+            className="flex flex-col gap-2 sm:flex-row"
           >
             <input
               name="email"
               type="email"
               required
               placeholder="relative@example.com"
-              className="flex-1 rounded-md border border-gray-300 px-3 py-2"
+              className="min-h-11 flex-1 rounded-md border border-gray-300 px-3 py-2 text-base"
             />
             <button
               type="submit"
-              className="rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800"
+              className="min-h-11 rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800 active:bg-gray-900"
             >
               Invite
             </button>
@@ -72,7 +80,7 @@ export default async function TreePage({
           {pendingInvites.length > 0 && (
             <ul className="mt-4 flex flex-col gap-1 text-sm text-gray-500">
               {pendingInvites.map((inv) => (
-                <li key={inv.id}>
+                <li key={inv.id} className="break-all">
                   {inv.email} — pending — share link:{" "}
                   <code className="rounded bg-gray-100 px-1">
                     /invite/{inv.token}

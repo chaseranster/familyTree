@@ -21,11 +21,13 @@ export default async function InvitePage({
   const session = await auth();
 
   return (
-    <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 p-8 text-center">
-      <h1 className="text-xl font-semibold">
+    <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 p-6 text-center sm:p-8">
+      <h1 className="text-xl font-semibold break-words">
         You&apos;ve been invited to join &quot;{invite.tree.name}&quot;
       </h1>
-      <p className="text-sm text-gray-500">Invited email: {invite.email}</p>
+      <p className="break-all text-sm text-gray-500">
+        Invited email: {invite.email}
+      </p>
 
       {!session?.user ? (
         <form
@@ -33,19 +35,20 @@ export default async function InvitePage({
             "use server";
             await signIn("google", { redirectTo: `/invite/${token}` });
           }}
+          className="w-full max-w-xs"
         >
           <button
             type="submit"
-            className="rounded-md bg-black px-5 py-2.5 text-white hover:bg-gray-800"
+            className="min-h-11 w-full rounded-md bg-black px-5 py-2.5 text-white hover:bg-gray-800 active:bg-gray-900"
           >
             Sign in with Google to accept
           </button>
         </form>
       ) : (
-        <form action={acceptInvite.bind(null, token)}>
+        <form action={acceptInvite.bind(null, token)} className="w-full max-w-xs">
           <button
             type="submit"
-            className="rounded-md bg-black px-5 py-2.5 text-white hover:bg-gray-800"
+            className="min-h-11 w-full rounded-md bg-black px-5 py-2.5 text-white hover:bg-gray-800 active:bg-gray-900"
           >
             Accept invite
           </button>
