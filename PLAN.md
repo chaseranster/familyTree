@@ -1,5 +1,9 @@
 # Family Tree App — Project Plan
 
+> This file is the running design narrative. It's now formalized into a full
+> documentation set in [`docs/`](./docs/README.md): PRD, user stories,
+> architecture, data model, API spec, NFRs, and ADRs for key decisions.
+
 ## 1. Goal
 
 A multi-tenant app where anyone can sign in with Google and either **create their own
