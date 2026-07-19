@@ -2,245 +2,183 @@
 
 ## 1. Goal
 
-A **public, global genealogy graph** (think WikiTree/Geni, not a private family
-scrapbook): anyone can sign in with Google, add themselves and their relatives, and
-separate family trees merge together automatically wherever they connect (shared
-ancestor, marriage, etc.), forming one giant connected graph of people.
+A multi-tenant app where anyone can sign in with Google and either **create their own
+private family tree** or **join one they're invited to**. Each tree is a fully
+isolated, private group — like a shared document, not a public graph. Trees never
+merge or connect to each other, even if two real families overlap; each tree's
+founder and delegated admins manage membership and moderation for that tree only.
 
-Each logged-in user's default view is centered on themselves and shows:
-- up to **5 generations of ancestors** (parents → … → great-great-great-grandparents)
-- up to **5 generations of descendants** (children → … → great-great-great-grandchildren)
-- the **spouses/partners and siblings** of every person on those direct lines
-
-This is a significantly bigger build than a single private family tree — it's closer
-to building a small-scale version of an existing genealogy platform. The plan below
-still gets you to a usable v1 without needing all of Geni's feature set on day one.
+This replaces an earlier "one global public graph" direction. That model made every
+new join a potential identity claim on a shared record and every family overlap a
+merge dispute — real, hard problems that aren't worth it for what this app needs to
+do. Isolated private trees sidestep both: there's nothing to merge, and only invited
+people ever see a tree's data.
 
 ## 2. Recommended Tech Stack
 
 | Layer | Choice | Why |
 |---|---|---|
 | Frontend | Next.js (React + TypeScript, App Router) | SSR, file-based routing, one deploy target with the backend |
-| Auth | Auth.js (NextAuth) — Google provider, open signup | Anyone with a Google account can register |
-| Database | PostgreSQL (Neon or Supabase) | Relational modeling + **recursive CTEs** are a good fit for bounded-depth graph traversal (5 up / 5 down) |
+| Auth | Auth.js (NextAuth) — Google provider, open signup | Anyone can create an account; tree access is separately gated (§4) |
+| Database | PostgreSQL (Neon or Supabase) | Straightforward relational modeling — all queries are scoped to one `treeId`, no unbounded graph traversal needed |
 | ORM | Prisma | Type-safe schema/migrations |
-| Tree visualization | `family-chart` (D3-based) or custom D3 | Renders generational trees with spouses/siblings |
-| File storage | Supabase Storage or Cloudflare R2 | Profile photos/documents |
+| Tree visualization | `family-chart` (D3-based) or custom D3 | Renders a full generational tree with spouses/siblings |
+| File storage | Supabase Storage or Cloudflare R2 | Profile photos/documents, private per tree |
 | Hosting | Vercel | Native Next.js support |
 
-**On graph database (Neo4j) vs. Postgres:** a global "everyone" graph sounds like a
-natural fit for a graph database, and it's worth revisiting later — but because every
-visibility query is *depth-bounded* (max ~10 hops: 5 up, 5 down, +1 lateral for
-spouses/siblings), Postgres recursive CTEs handle it well without adding a second
-database to operate. Start on Postgres; migrate the traversal layer to Neo4j only if
-it becomes a measured bottleneck at scale.
+No graph database and no recursive-CTE visibility engine are needed anymore — every
+query is naturally bounded to "everyone in tree X," which a normal indexed
+`WHERE tree_id = ?` handles.
 
 ## 3. Data Model
 
 ```
 User
   id, googleId, email, name, avatarUrl, createdAt
-  linkedPersonId (nullable, unique)   // which Person node is "me"
-  role (MEMBER | ADMIN | FOUNDER)     // ADMIN/FOUNDER = fallback approvers + moderation authority
 
-Person                                 // ONE global table — not scoped to a family
-  id, firstName, lastName, maidenName, gender,
-  birthDate, deathDate, birthPlace,
-  isLiving (bool), privacyLevel (PUBLIC | RESTRICTED),
+Tree                                    // one private family tree
+  id, name, createdBy, createdAt
+
+TreeMember                              // per-tree membership + role
+  id, treeId, userId, role (FOUNDER | ADMIN | MEMBER),
+  linkedPersonId (nullable, unique per tree)   // which Person in THIS tree is "me"
+  joinedAt
+
+Person                                  // scoped to one tree — not shared globally
+  id, treeId, firstName, lastName, maidenName, gender,
+  birthDate, deathDate, birthPlace, isLiving (bool),
   bio, photoUrl, createdBy, createdAt, updatedAt
 
-ParentChild                            // directed edge: parent -> child
-  id, parentId, childId, type (BIOLOGICAL | ADOPTED | STEP | FOSTER),
+ParentChild                             // directed edge: parent -> child, within a tree
+  id, treeId, parentId, childId, type (BIOLOGICAL | ADOPTED | STEP | FOSTER),
   addedBy, createdAt
 
-Union                                  // spouse / partner edge
-  id, person1Id, person2Id, type (MARRIAGE | PARTNERSHIP),
+Union                                   // spouse / partner edge, within a tree
+  id, treeId, person1Id, person2Id, type (MARRIAGE | PARTNERSHIP),
   startDate, endDate, status (CURRENT | DIVORCED | WIDOWED),
   addedBy, createdAt
 
-Revision                               // wiki-style edit history — required for open editing
-  id, entityType (PERSON | PARENT_CHILD | UNION), entityId,
-  editedBy, action (CREATE | UPDATE | DELETE), snapshot (JSON),
-  editedAt
+Revision                                // edit history, scoped to a tree
+  id, treeId, entityType (PERSON | PARENT_CHILD | UNION | TREE_MEMBER), entityId,
+  editedBy, action (CREATE | UPDATE | DELETE), snapshot (JSON), editedAt
 
-MergeRequest                           // resolving duplicate profiles (inevitable on an open graph)
-  id, sourcePersonId, targetPersonId, proposedBy,
+MergeRequest                            // duplicate people WITHIN the same tree
+  id, treeId, sourcePersonId, targetPersonId, proposedBy,
   status (PENDING | APPROVED | REJECTED), resolvedBy, resolvedAt
 
-Report                                 // abuse/vandalism/incorrect-info flagging
-  id, personId, reportedBy, reason, status, createdAt
-
-MembershipRequest                      // gate between "authenticated" and "trusted member"
-  id, requesterUserId,
+MembershipRequest                       // request to join a specific tree
+  id, treeId, requesterUserId,
   requestType (NEW_PERSON | CLAIM_EXISTING),
-  claimedPersonId (nullable),          // set when requestType = CLAIM_EXISTING
-  newPersonDraft (JSON, nullable),     // set when requestType = NEW_PERSON
+  claimedPersonId (nullable), newPersonDraft (JSON, nullable),
   anchorPersonId, relationshipType,
-  requiredApprovals (int),             // 1 for NEW_PERSON, 2 for CLAIM_EXISTING
-  status (PENDING | APPROVED | REJECTED),
-  createdAt, resolvedAt
+  requiredApprovals (int),              // 1 for NEW_PERSON, 2 for CLAIM_EXISTING
+  status (PENDING | APPROVED | REJECTED), createdAt, resolvedAt
 
-MembershipApproval                     // one row per approver on a request
+MembershipApproval
   id, requestId, approverUserId, approvedAt
 
 Media
   id, personId, url, caption, uploadedBy, uploadedAt
 ```
 
-Why no `Family` table this time: with a global open graph, "family" isn't a fixed
-boundary — it's just whichever people happen to be connected. Access control is now
-computed per-viewer (see §4), not per-group.
+A person can legitimately exist as separate records in two different trees if real
+families overlap (e.g. in-laws each keep their own tree) — that's an accepted
+limitation of "trees never merge," not a bug to solve.
 
-## 4. Visibility Model (the core hard problem)
+## 4. Membership & Join Flow
 
-For a viewing user linked to `Person P`, the visible set is:
+Two ways a `Tree` gets new members:
 
-1. **Ascending**: walk `ParentChild` edges upward from P, up to 5 generations
-   (P's parents, grandparents, … great-great-great-grandparents).
-2. **Descending**: walk `ParentChild` edges downward from P, up to 5 generations
-   (children, grandchildren, … great-great-great-grandchildren).
-3. **Lateral, one hop, at every node included above (plus P)**: that node's spouses/
-   partners (`Union`) and siblings (other children of the same parent).
+**A. Direct invite** (the common case): a `FOUNDER`/`ADMIN` invites someone by email.
+The invitee signs in with Google, the invite auto-attaches them as a `TreeMember`,
+and they either link to a `Person` the inviter already created for them or add
+themselves.
 
-This is implemented as a **recursive CTE**, bounded to depth 5 in each direction, run
-per-request (or cached briefly, invalidated when an edge near that user changes).
-Note this definition intentionally does **not** pull in cousins' descendants or
-in-laws' extended families — only direct-line ancestors/descendants plus their
-immediate siblings/spouses. That's a reasonable v1 scope; "expand to full cousin
-branches" is a natural v2 toggle.
+**B. Self-service join request** (someone finds/hears about a tree and asks in): same
+two-tier flow as before, now scoped to one tree instead of a global graph:
+- **`NEW_PERSON`** — "I'm not in this tree yet; I'm the child/spouse of anchor person
+  X." Lower risk, purely additive. **1 approval required**, from an existing member
+  connected to that anchor (or an admin if no linked member is close enough).
+- **`CLAIM_EXISTING`** — "This `Person` record already in the tree *is me*." Higher
+  risk — it's a claim on a record others may have already contributed to.
+  **2 independent approvals required** from members connected to that person, or a
+  single `ADMIN`/`FOUNDER` override.
 
-**Enforcement**: every read AND every write endpoint must check "is this Person in my
-visible set?" server-side before returning data or accepting an edit — never trust a
-client-side check.
+**Admin delegation**: a tree's `FOUNDER` can promote any `TreeMember` to `ADMIN`.
+Admins share approval and moderation authority for that tree only — authority never
+extends across trees. Promotions/demotions are logged as `Revision`s for
+auditability, same as any other tree change.
 
-**Privacy for living people**: default `RESTRICTED` for anyone marked `isLiving`.
-Restricted profiles show only name + relationship (no birthdate/location/bio/photo)
-to viewers beyond a tight radius (e.g. 1–2 hops), even if they're within the general
-5-generation visible set. Only the person themselves (once they claim their profile)
-can loosen this.
+## 5. Visibility
 
-## 5. Membership & Join Flow
+Within a tree, **every member sees the whole tree** — there's no per-member computed
+radius. The tree itself is the privacy boundary (only members see it at all), so a
+second layer of intra-tree visibility restriction isn't needed for v1.
 
-Authentication (Google sign-in) and membership (trusted access to view/edit the tree)
-are deliberately separate. Signing in with Google only creates a `User` — it does not
-grant a `linkedPersonId` or any tree access. Access is earned through a **web-of-trust
-join flow**, approved by whichever existing member is closest to the claim, not by one
-central gatekeeper for the whole graph:
-
-1. **Authenticate**: Google sign-in creates a `User` with no tree access yet.
-2. **Request to join** — two request types with different stakes:
-   - **`NEW_PERSON`**: "I'm not in the tree yet; I'm the child/spouse/etc. of anchor
-     person X." Lower risk — it's an addition, not a takeover. **1 approval required.**
-   - **`CLAIM_EXISTING`**: "This existing `Person` node someone else already added
-     *is me*." Higher risk — that node may already carry data (photos, bio, edges)
-     other people contributed, so a false claim is effectively identity takeover of
-     an existing record. **2 independent approvals required**, from two different
-     already-linked members connected to that person (not just one relative) — or a
-     single ADMIN/FOUNDER override.
-3. **Route the approval(s)** — delegated, not centralized:
-   - If the anchor/claimed person already has linked, active member(s) among their
-     close relatives, those members are asked to approve — the people best placed to
-     confirm the claim is real.
-   - If no linked member can be found for that branch (deceased anchor, nobody's
-     joined yet), it falls to whoever currently manages that branch (anyone with that
-     `Person` in their visible/edit radius).
-   - If still no one can be found (orphan branch, first request ever), it falls to an
-     **ADMIN or FOUNDER** (`User.role`).
-4. **On approval** (once `requiredApprovals` is met): the `Person` node/edge is
-   created or confirmed, `User.linkedPersonId` is set, and every approval is logged
-   as a `Revision` (each approver recorded as a vouching party). The new member's own
-   5-generation visibility now computes from their newly linked node.
-5. **On rejection**: requester is notified and can appeal to an admin/founder.
-
-**Admin delegation**: the founder isn't a permanent single point of failure — a
-founder can promote trusted members to `ADMIN`, who then share fallback-approval and
-moderation authority. Promotions/demotions are themselves logged as `Revision`s
-(entityType `USER`) for auditability, same as any other sensitive action in the app.
-
-Routing approval to the *nearest verified relatives* rather than one central admin
-avoids a bottleneck as the tree grows, while requiring real, already-trusted people to
-vouch for every new connection — and requiring two of them specifically when someone
-is claiming to *be* an already-documented person, since that's a stronger, riskier
-claim than simply being added as a new relative.
+A "focus view" — centering the tree visualization on yourself and fading out distant
+branches — is worth keeping as a **UI convenience** for large trees, not as an access
+control mechanism: it's just a client-side filter over data the member can already
+see in full.
 
 ## 6. Editing Model
 
-Per your direction: **anyone within their visible radius can edit** any person/
-relationship they can currently see.
+Any `MEMBER` (not just admins) can add/edit people and relationships in a tree they
+belong to.
 
-- Every write creates a `Revision` row (who changed what, when, before/after
-  snapshot) — this is what makes open editing survivable. Every profile needs a
-  visible "history" tab and one-click revert.
-- **Conflict handling (v1)**: last-write-wins, but nothing is destroyed — history
-  keeps every prior version, so bad edits are always recoverable.
-- **Duplicate people are inevitable** on an open graph (two cousins each add the same
-  grandparent as a new node). Ship a **merge tool** early: search suggests possible
-  duplicates when adding a person; either party can propose a `MergeRequest`; the
-  other connected editors can review before it's finalized.
-- **Abuse/vandalism**: since anyone-in-radius can edit real people's data, add a
-  `Report` flow from day one and a lightweight moderation queue (e.g. auto-flag mass
-  deletions or edits to many people in a short window).
+- Every write creates a `Revision` (who changed what, when, before/after snapshot),
+  with a visible history tab and one-click revert per profile.
+- **Conflict handling**: last-write-wins, nothing destroyed — full history means bad
+  edits are always recoverable.
+- **Duplicates within a tree are still possible** (two cousins each add the same
+  grandparent) even without cross-tree merging. Keep the `MergeRequest` flow, scoped
+  to one tree: search suggests likely duplicates on add; either member can propose a
+  merge; other connected members review before it's finalized.
+- **Disputes/misuse within a tree**: since it's a small trusted group (not the open
+  public), a lightweight path is enough for v1 — an `ADMIN` can revert any edit or
+  remove a member; no global moderation queue needed.
 
-## 7. Legal / Policy Considerations & Privacy Risk Register
+## 7. Privacy Considerations
 
-Because this now involves data about real people — including living people who never
-signed up — plan for:
-- A **Terms of Service + Privacy Policy** before public launch.
-- A **takedown / "right to be forgotten"** process: a living person (or their proxy)
-  can request their profile be restricted or removed even if someone else added them.
-- **Minors**: avoid collecting detailed data on children beyond name + relationship;
-  no photos/bios for minors by default.
-- **No public search-engine indexing** of person profiles by default (`noindex`),
-  and rate-limit/guard against bulk scraping of the graph.
-- Decide early whether registration is fully open at launch or gated behind an
-  invite/waitlist while moderation tooling matures — open-with-no-moderation is the
-  highest-risk configuration.
+Much lighter than the "public platform" version of this plan, because access is now
+bounded to an invited group per tree rather than the open internet — but it's still
+real people's data, some of it entered by someone other than the person themselves:
 
-### Privacy risk register
-
-The thing that makes this app's privacy posture different from a normal app: **most
-of the people whose data lives in it never signed up and never agreed to anything.**
-Relatives get added by other relatives. That single fact drives most of the risk
-below.
-
-| Risk | Why it applies here | Mitigation already in plan / needed |
-|---|---|---|
-| **Non-consenting data subjects** | Most `Person` records belong to people who never created an account or agreed to a ToS — you're a de facto data controller for people who aren't your users. | Restricted-by-default living-person privacy (§4); public takedown/opt-out process; privacy policy that addresses non-users explicitly, not just registered members. |
-| **Sensitive inferences from relationship structure alone** | Family-graph data can reveal adoption status, same-sex partnerships (sexual orientation — a GDPR "special category"), estrangement, or non-paternity events, even without anyone stating them directly. | Treat `Union.type`, adoption `ParentChild.type`, and any free-text `bio` as sensitive-by-default, not just birthdate/photo. |
-| **Minors' data** | Relatives will enter names/photos/birthdates of children who can't consent themselves. | Name + relationship only for minors by default; no photos/bios; minors not `CLAIM_EXISTING`-able until they can consent. |
-| **Verification-data creep** | The new 2-approval flow for `CLAIM_EXISTING` solves identity risk *without* documents — resist the temptation to "just ask for an ID photo" later; ID/biometric verification is a much higher liability tier (e.g. Illinois BIPA carries statutory damages per violation). | Keep verification social (multi-approver), not document- or biometric-based. |
-| **Cross-border data transfer** | If any relative lives outside the US, their data sits on US infrastructure — GDPR (and similar laws) applies based on the *data subject's* location, not yours. | No EU legal entity needed at hobby scale, but honor access/delete requests promptly and say so in the privacy policy. |
-| **Breach exposure & notification** | A breach here leaks names, birthdates, relationships, and photos of possibly thousands of people — many with no contact info on file, making legally-required breach notification hard. | Encrypt at rest, least-privilege DB access, private-by-default photo storage, don't collect anything beyond what the tree needs (no IDs/SSNs). |
-| **Family-social harm (not just legal)** | Even where nothing is illegal, exposing biological parentage, estrangement, or a living person's location via listed relatives can cause real harm. | Restricted defaults + no indexing solve most of this; the takedown process is the backstop. |
-| **Founder/admin power itself** | Founders/admins (§5) end up with override access to identity disputes and effectively see sensitive family facts others don't. | Log every promotion, approval, and override as a `Revision` so admin power is auditable, not just member edits. |
-
-Practically: none of this needs a lawyer at Phase 0–2 (private beta, a handful of
-relatives) — it needs to be *designed for* now so it isn't a scramble at Phase 3
-(§10), which is exactly why it's already gating that phase's exit criteria.
+- **Living people**: keep an `isLiving` flag; consider letting a person hide their
+  own bio/photo once they've claimed their profile, even from other tree members.
+- **Minors**: default to name + relationship only; skip photos/detailed bios unless
+  a parent/guardian in the tree explicitly adds them.
+- **Verification stays social, not document-based**: the 2-approver `CLAIM_EXISTING`
+  flow (§4) is enough — avoid ever asking for ID uploads or biometric verification,
+  which would introduce disproportionate liability (e.g. biometric privacy laws with
+  per-violation statutory damages) for a private family app.
+  - **Leave-a-tree / takedown**: a member should be able to leave a tree, and a
+  living person should be able to ask to have their own profile restricted or
+  removed even if someone else added them — simple in-app action, not a legal
+  process, since it stays within one private group.
+- A basic **Privacy Policy** covering what's stored and who can see it is still worth
+  having before other people's data goes in, even at small scale.
 
 ## 8. Core Features
 
 **MVP**
-- Google sign-in (open registration)
-- Membership join flow: request → nearest-relative (or founder) approval → linked `Person`
-- Add/edit people and `ParentChild`/`Union` relationships, scoped to your visible set
-- Recursive-CTE visibility engine (5 up / 5 down / siblings & spouses)
-- Interactive tree visualization scoped to the viewer
+- Google sign-in
+- Create a tree (become its founder) or join one via invite/request
+- Add/edit people and `ParentChild`/`Union` relationships within a tree
+- Full-tree visualization
 - Revision history + revert on every profile
-- Living-person privacy restriction
+- Admin delegation (founder → admins) per tree
 
 **V2**
-- Merge-duplicates tool
-- Reporting/moderation queue
+- Merge-duplicates tool (within a tree)
 - Photo/document uploads, life-event timeline
-- Search (name search, restricted results outside your visible set)
+- Search within a tree
 - GEDCOM import/export
+- "Focus view" (center on self, fade distant branches) as a display filter
 
 **V3**
-- Configurable visibility radius (extend beyond siblings/spouses to full cousin
-  branches)
 - Mobile-responsive/PWA
-- Stronger identity verification for claiming a living profile
+- Multiple trees per user with an easy switcher (e.g. maternal vs. paternal side, or
+  managing a tree for in-laws)
 
 ## 9. High-Level Architecture
 
@@ -252,28 +190,24 @@ Auth.js (Next.js API routes) <---> Google Identity
    |  session (JWT/cookie)
    v
 Next.js Server (API routes / Server Actions)
-   |-- visibility engine (recursive CTE, per-viewer) --> PostgreSQL
-   |-- Prisma (Person / ParentChild / Union / Revision / MergeRequest / Report)
-   |-- Storage SDK --> Supabase/R2 (photos)
+   |-- every query/write scoped by treeId + membership check --> PostgreSQL
+   |-- Prisma (Tree / TreeMember / Person / ParentChild / Union / Revision / MergeRequest)
+   |-- Storage SDK --> Supabase/R2 (photos, private per tree)
    v
 Vercel deployment
 ```
 
 ## 10. Suggested Build Phases
 
-Sequenced to de-risk the hardest technical bet first (the visibility engine), then
-build the trust-and-safety tooling *before* opening access, rather than after an
-incident. Each phase has an exit criterion — not just a feature list.
-
 | Phase | Goal | Exit criteria |
 |---|---|---|
-| **0. Walking skeleton** | Prove auth + schema + visibility query work end-to-end | Seed a ~30-person test tree with tricky cases (remarriage, half-siblings, adoption); the recursive CTE returns the correct visible set, hand-verified |
-| **1. Private data entry** | You + a few relatives build a real tree, using the membership join flow (§5) at small scale | Real family data entered via request/approve, tree renders correctly, revisions logged on every write |
-| **2. Trust & safety** | Build the tooling open editing and open joining require | You can resolve a simulated bad edit (revert), a duplicate profile (merge), and an orphan-branch join request (founder fallback) entirely through the UI |
-| **3. Legal & public-readiness** | Clear non-engineering blockers | ToS/privacy policy + takedown process exist; noindex + scraping guards in place; decide whether join requests stay approval-gated indefinitely or open up further |
-| **4. Soft public launch** | Open to a wider circle, watch real usage | Stable for a few weeks with acceptable moderation/approval load |
-| **5. Enrichment (v2)** | Photos, search, GEDCOM import/export, configurable visibility radius | — |
+| **0. Walking skeleton** | Prove auth + tree creation + membership scoping work end-to-end | Create a tree, invite a second Google account, confirm they only see that tree's data |
+| **1. Core data entry** | Build out a real tree with real relatives | People/relationships added, tree visualization renders correctly, revisions logged |
+| **2. Trust & safety (lightweight)** | Handle the small-scale versions of open editing | Revert a bad edit, merge a duplicate person, promote an admin — all through the UI |
+| **3. Privacy pass** | Cover the essentials before inviting people outside your immediate circle | Privacy policy exists; living-person hide option and leave-tree/takedown action work |
+| **4. Multi-tree rollout** | Let other people create their own independent trees using the app | A second, unrelated tree can be created and used with zero interaction with the first |
+| **5. Enrichment (v2)** | Photos, search, GEDCOM import/export, focus view | — |
 
 ## 11. Open Questions
-- Any existing data source to seed the graph (a family GEDCOM export, spreadsheet)?
-- Who should hold `FOUNDER`/`ADMIN` role at launch besides you, if anyone?
+- Any existing data source to seed your first tree (a family GEDCOM export, spreadsheet)?
+- Should tree creation be open to anyone with a Google account, or should the very first tree (yours) be seeded by you directly with invites only, before deciding whether to let others spin up unrelated trees at all (Phase 4)?
