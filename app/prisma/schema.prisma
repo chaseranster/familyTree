@@ -1,0 +1,316 @@
+// Prisma schema for the Family Tree App.
+// Mirrors docs/DATA_MODEL.md at the repo root.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TreeRole {
+  FOUNDER
+  ADMIN
+  MEMBER
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  OTHER
+  UNKNOWN
+}
+
+enum ParentChildType {
+  BIOLOGICAL
+  ADOPTED
+  STEP
+  FOSTER
+}
+
+enum UnionType {
+  MARRIAGE
+  PARTNERSHIP
+}
+
+enum UnionStatus {
+  CURRENT
+  DIVORCED
+  WIDOWED
+}
+
+enum RevisionEntityType {
+  PERSON
+  PARENT_CHILD
+  UNION
+  TREE_MEMBER
+}
+
+enum RevisionAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum MembershipRequestType {
+  NEW_PERSON
+  CLAIM_EXISTING
+}
+
+enum RelationshipClaimType {
+  CHILD_OF
+  SPOUSE_OF
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  googleId  String   @unique
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+
+  treeMemberships     TreeMember[]
+  createdTrees        Tree[]               @relation("TreeCreatedBy")
+  createdPeople       Person[]             @relation("PersonCreatedBy")
+  consentGrants       Person[]             @relation("PersonConsentGrantedBy")
+  addedParentChildren ParentChild[]        @relation("ParentChildAddedBy")
+  addedUnions         Union[]              @relation("UnionAddedBy")
+  revisions           Revision[]           @relation("RevisionEditedBy")
+  proposedMerges      MergeRequest[]       @relation("MergeProposedBy")
+  resolvedMerges      MergeRequest[]       @relation("MergeResolvedBy")
+  membershipRequests  MembershipRequest[]  @relation("MembershipRequester")
+  membershipApprovals MembershipApproval[] @relation("MembershipApprover")
+  sentInvites         Invite[]             @relation("InviteInvitedBy")
+  uploadedMedia       Media[]              @relation("MediaUploadedBy")
+}
+
+model Tree {
+  id        String   @id @default(uuid())
+  name      String
+  createdBy String
+  createdAt DateTime @default(now())
+
+  creator            User                 @relation("TreeCreatedBy", fields: [createdBy], references: [id])
+  members            TreeMember[]
+  people             Person[]
+  parentChildren     ParentChild[]
+  unions             Union[]
+  revisions          Revision[]
+  mergeRequests      MergeRequest[]
+  membershipRequests MembershipRequest[]
+  invites            Invite[]
+}
+
+model TreeMember {
+  id             String   @id @default(uuid())
+  treeId         String
+  userId         String
+  role           TreeRole @default(MEMBER)
+  linkedPersonId String?  @unique
+  joinedAt       DateTime @default(now())
+
+  tree         Tree    @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  linkedPerson Person? @relation("PersonLinkedMember", fields: [linkedPersonId], references: [id])
+
+  @@unique([treeId, userId])
+}
+
+model Person {
+  id         String    @id @default(uuid())
+  treeId     String
+  firstName  String
+  lastName   String?
+  maidenName String?
+  gender     Gender    @default(UNKNOWN)
+  birthDate  DateTime?
+  deathDate  DateTime?
+  birthPlace String?
+  isLiving   Boolean   @default(true)
+  bio        String?
+  photoUrl   String?
+
+  // Consent gating -- see docs/adr/0003-consent-gated-sensitive-fields.md
+  sensitiveDetailsVisible Boolean   @default(false)
+  consentGrantedBy        String?
+  consentGrantedAt        DateTime?
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tree           Tree                @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  creator        User                @relation("PersonCreatedBy", fields: [createdBy], references: [id])
+  consentGrantor User?               @relation("PersonConsentGrantedBy", fields: [consentGrantedBy], references: [id])
+  linkedMember   TreeMember?         @relation("PersonLinkedMember")
+  parentEdges    ParentChild[]       @relation("ParentEdges")
+  childEdges     ParentChild[]       @relation("ChildEdges")
+  unionsAsPerson1 Union[]            @relation("UnionPerson1")
+  unionsAsPerson2 Union[]            @relation("UnionPerson2")
+  media          Media[]
+  mergeSources   MergeRequest[]      @relation("MergeSourcePerson")
+  mergeTargets   MergeRequest[]      @relation("MergeTargetPerson")
+  claimRequests  MembershipRequest[] @relation("ClaimedPerson")
+  anchorRequests MembershipRequest[] @relation("AnchorPerson")
+
+  @@index([treeId])
+}
+
+model ParentChild {
+  id        String          @id @default(uuid())
+  treeId    String
+  parentId  String
+  childId   String
+  type      ParentChildType @default(BIOLOGICAL)
+  addedBy   String
+  createdAt DateTime        @default(now())
+
+  tree   Tree   @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  parent Person @relation("ParentEdges", fields: [parentId], references: [id], onDelete: Cascade)
+  child  Person @relation("ChildEdges", fields: [childId], references: [id], onDelete: Cascade)
+  adder  User   @relation("ParentChildAddedBy", fields: [addedBy], references: [id])
+
+  @@index([treeId])
+  @@index([parentId])
+  @@index([childId])
+}
+
+model Union {
+  id        String      @id @default(uuid())
+  treeId    String
+  person1Id String
+  person2Id String
+  type      UnionType   @default(MARRIAGE)
+  startDate DateTime?
+  endDate   DateTime?
+  status    UnionStatus @default(CURRENT)
+  addedBy   String
+  createdAt DateTime    @default(now())
+
+  tree    Tree   @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  person1 Person @relation("UnionPerson1", fields: [person1Id], references: [id], onDelete: Cascade)
+  person2 Person @relation("UnionPerson2", fields: [person2Id], references: [id], onDelete: Cascade)
+  adder   User   @relation("UnionAddedBy", fields: [addedBy], references: [id])
+
+  @@index([treeId])
+}
+
+model Revision {
+  id         String             @id @default(uuid())
+  treeId     String
+  entityType RevisionEntityType
+  entityId   String
+  editedBy   String
+  action     RevisionAction
+  snapshot   Json
+  editedAt   DateTime           @default(now())
+
+  tree   Tree @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  editor User @relation("RevisionEditedBy", fields: [editedBy], references: [id])
+
+  @@index([treeId])
+  @@index([entityType, entityId])
+}
+
+model MergeRequest {
+  id             String        @id @default(uuid())
+  treeId         String
+  sourcePersonId String
+  targetPersonId String
+  proposedBy     String
+  status         RequestStatus @default(PENDING)
+  resolvedBy     String?
+  resolvedAt     DateTime?
+
+  tree     Tree   @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  source   Person @relation("MergeSourcePerson", fields: [sourcePersonId], references: [id], onDelete: Cascade)
+  target   Person @relation("MergeTargetPerson", fields: [targetPersonId], references: [id], onDelete: Cascade)
+  proposer User   @relation("MergeProposedBy", fields: [proposedBy], references: [id])
+  resolver User?  @relation("MergeResolvedBy", fields: [resolvedBy], references: [id])
+
+  @@index([treeId])
+}
+
+model MembershipRequest {
+  id                String                @id @default(uuid())
+  treeId            String
+  requesterUserId   String
+  requestType       MembershipRequestType
+  claimedPersonId   String?
+  newPersonDraft    Json?
+  anchorPersonId    String
+  relationshipType  RelationshipClaimType
+  requiredApprovals Int
+  status            RequestStatus         @default(PENDING)
+  createdAt         DateTime              @default(now())
+  resolvedAt        DateTime?
+
+  tree          Tree                 @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  requester     User                 @relation("MembershipRequester", fields: [requesterUserId], references: [id])
+  claimedPerson Person?              @relation("ClaimedPerson", fields: [claimedPersonId], references: [id])
+  anchorPerson  Person               @relation("AnchorPerson", fields: [anchorPersonId], references: [id])
+  approvals     MembershipApproval[]
+
+  @@index([treeId])
+}
+
+model MembershipApproval {
+  id             String   @id @default(uuid())
+  requestId      String
+  approverUserId String
+  approvedAt     DateTime @default(now())
+
+  request  MembershipRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver User              @relation("MembershipApprover", fields: [approverUserId], references: [id])
+
+  @@unique([requestId, approverUserId])
+}
+
+model Invite {
+  id             String       @id @default(uuid())
+  treeId         String
+  email          String
+  linkedPersonId String?
+  role           TreeRole     @default(MEMBER)
+  token          String       @unique
+  status         InviteStatus @default(PENDING)
+  invitedBy      String
+  createdAt      DateTime     @default(now())
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+
+  tree    Tree @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  inviter User @relation("InviteInvitedBy", fields: [invitedBy], references: [id])
+
+  @@index([treeId])
+  @@index([email])
+}
+
+model Media {
+  id         String   @id @default(uuid())
+  personId   String
+  url        String
+  caption    String?
+  uploadedBy String
+  uploadedAt DateTime @default(now())
+
+  person   Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+  uploader User   @relation("MediaUploadedBy", fields: [uploadedBy], references: [id])
+
+  @@index([personId])
+}
