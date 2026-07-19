@@ -41,6 +41,7 @@ it becomes a measured bottleneck at scale.
 User
   id, googleId, email, name, avatarUrl, createdAt
   linkedPersonId (nullable, unique)   // which Person node is "me"
+  isFounder (bool)                    // fallback approver for orphaned join requests
 
 Person                                 // ONE global table — not scoped to a family
   id, firstName, lastName, maidenName, gender,
@@ -68,6 +69,14 @@ MergeRequest                           // resolving duplicate profiles (inevitab
 
 Report                                 // abuse/vandalism/incorrect-info flagging
   id, personId, reportedBy, reason, status, createdAt
+
+MembershipRequest                      // gate between "authenticated" and "trusted member"
+  id, requesterUserId,
+  claimedPersonId (nullable),          // claiming an existing unclaimed node
+  newPersonDraft (JSON, nullable),     // proposing a brand-new person
+  anchorPersonId, relationshipType,
+  status (PENDING | APPROVED | REJECTED),
+  approverUserId, resolvedAt, createdAt
 
 Media
   id, personId, url, caption, uploadedBy, uploadedAt
@@ -105,7 +114,40 @@ to viewers beyond a tight radius (e.g. 1–2 hops), even if they're within the g
 5-generation visible set. Only the person themselves (once they claim their profile)
 can loosen this.
 
-## 5. Editing Model
+## 5. Membership & Join Flow
+
+Authentication (Google sign-in) and membership (trusted access to view/edit the tree)
+are deliberately separate. Signing in with Google only creates a `User` — it does not
+grant a `linkedPersonId` or any tree access. Access is earned through a **web-of-trust
+join flow**, approved by whichever existing member is closest to the claim, not by one
+central gatekeeper for the whole graph:
+
+1. **Authenticate**: Google sign-in creates a `User` with no tree access yet.
+2. **Request to join**: onboarding asks the new user to either claim an existing
+   unclaimed `Person` node (someone already listed them), or propose themselves as a
+   new `Person` connected by a relationship to an existing anchor person (e.g. "I'm
+   the child of John Doe"). This creates a `MembershipRequest`.
+3. **Route the approval** — delegated, not centralized:
+   - If the anchor person already has a linked, active member, **that member
+     approves** — the person best placed to confirm the claim is real.
+   - If the anchor person has no linked member yet (e.g. deceased, or hasn't joined),
+     it falls to whoever currently manages that branch (anyone with that `Person` in
+     their visible/edit radius).
+   - If no one can be found (orphan branch, first request ever), it falls to the
+     **founder** (`User.isFounder`) — the original seed member acts as the permanent
+     fallback approver, not the default path.
+4. **On approval**: the `Person` node/edge is created or confirmed, `User.linkedPersonId`
+   is set, and the approval is logged as a `Revision` (approver recorded as the
+   vouching party). The new member's own 5-generation visibility now computes from
+   their newly linked node.
+5. **On rejection**: requester is notified and can appeal to the founder.
+
+Routing approval to the *nearest verified relative* rather than one central admin
+avoids a bottleneck as the tree grows, while still requiring a real, already-trusted
+person to vouch for every new connection — the core safeguard against identity fraud
+(someone falsely claiming to be a specific living relative).
+
+## 6. Editing Model
 
 Per your direction: **anyone within their visible radius can edit** any person/
 relationship they can currently see.
@@ -123,7 +165,7 @@ relationship they can currently see.
   `Report` flow from day one and a lightweight moderation queue (e.g. auto-flag mass
   deletions or edits to many people in a short window).
 
-## 6. Legal / Policy Considerations (real, not optional, for an open public platform)
+## 7. Legal / Policy Considerations (real, not optional, for an open public platform)
 
 Because this now involves data about real people — including living people who never
 signed up — plan for:
@@ -138,12 +180,11 @@ signed up — plan for:
   invite/waitlist while moderation tooling matures — open-with-no-moderation is the
   highest-risk configuration.
 
-## 7. Core Features
+## 8. Core Features
 
 **MVP**
 - Google sign-in (open registration)
-- Onboarding: create your own `Person`, or search + claim an existing profile someone
-  else added
+- Membership join flow: request → nearest-relative (or founder) approval → linked `Person`
 - Add/edit people and `ParentChild`/`Union` relationships, scoped to your visible set
 - Recursive-CTE visibility engine (5 up / 5 down / siblings & spouses)
 - Interactive tree visualization scoped to the viewer
@@ -163,7 +204,7 @@ signed up — plan for:
 - Mobile-responsive/PWA
 - Stronger identity verification for claiming a living profile
 
-## 8. High-Level Architecture
+## 9. High-Level Architecture
 
 ```
 Browser (Next.js React app)
@@ -180,20 +221,22 @@ Next.js Server (API routes / Server Actions)
 Vercel deployment
 ```
 
-## 9. Suggested Build Phases
-1. **Scaffold**: Next.js + TypeScript, Prisma + Postgres, Auth.js Google provider, open signup, deploy skeleton to Vercel.
-2. **Data layer**: `Person`, `ParentChild`, `Union`, `Revision` tables + migrations.
-3. **Onboarding flow**: claim-or-create Person on first login.
-4. **Visibility engine**: recursive CTE for 5-gen up/down + siblings/spouses; enforce on every read/write.
-5. **CRUD UI**: add/edit people & relationships, all writes logged to `Revision`.
-6. **Tree visualization**: render the viewer's visible subgraph.
-7. **Privacy**: living-person restrictions.
-8. **History/revert UI**.
-9. **Merge tool + reporting/moderation** (needed before any real public launch).
-10. **Legal**: ToS/Privacy Policy, takedown process.
-11. **Media, search, GEDCOM** (stretch).
+## 10. Suggested Build Phases
 
-## 10. Open Questions
-- Launch strategy: fully open signup from day one, or an invite/waitlist period while merge-tooling and moderation mature? (Open platforms without moderation tend to accumulate vandalism/duplicates fast.)
-- Should "claiming" an existing profile someone else created require any verification, or is self-attestation ("this is me") enough for v1?
+Sequenced to de-risk the hardest technical bet first (the visibility engine), then
+build the trust-and-safety tooling *before* opening access, rather than after an
+incident. Each phase has an exit criterion — not just a feature list.
+
+| Phase | Goal | Exit criteria |
+|---|---|---|
+| **0. Walking skeleton** | Prove auth + schema + visibility query work end-to-end | Seed a ~30-person test tree with tricky cases (remarriage, half-siblings, adoption); the recursive CTE returns the correct visible set, hand-verified |
+| **1. Private data entry** | You + a few relatives build a real tree, using the membership join flow (§5) at small scale | Real family data entered via request/approve, tree renders correctly, revisions logged on every write |
+| **2. Trust & safety** | Build the tooling open editing and open joining require | You can resolve a simulated bad edit (revert), a duplicate profile (merge), and an orphan-branch join request (founder fallback) entirely through the UI |
+| **3. Legal & public-readiness** | Clear non-engineering blockers | ToS/privacy policy + takedown process exist; noindex + scraping guards in place; decide whether join requests stay approval-gated indefinitely or open up further |
+| **4. Soft public launch** | Open to a wider circle, watch real usage | Stable for a few weeks with acceptable moderation/approval load |
+| **5. Enrichment (v2)** | Photos, search, GEDCOM import/export, configurable visibility radius | — |
+
+## 11. Open Questions
+- Should "claiming" an existing profile someone else created require any verification beyond nearest-relative approval, or is that approval enough for v1?
+- Should founder approval authority ever transfer/delegate to additional permanent admins as the tree grows, to avoid a single point of failure?
 - Any existing data source to seed the graph (a family GEDCOM export, spreadsheet)?
