@@ -4,15 +4,19 @@ import { prisma } from "@/lib/prisma";
 import { createInvite } from "@/app/actions/invites";
 import { createPerson } from "@/app/actions/people";
 import { createParentChild, createUnion } from "@/app/actions/relationships";
-import { buildFamilyForest, personLabel } from "@/lib/family-tree";
+import { buildFamilyForest, buildFocusView, personLabel } from "@/lib/family-tree";
 import { FamilyTreeView } from "./FamilyTreeView";
+import { FocusFamilyView } from "./FocusFamilyView";
 
 export default async function TreePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ treeId: string }>;
+  searchParams: Promise<{ focus?: string }>;
 }) {
   const { treeId } = await params;
+  const { focus: focusParam } = await searchParams;
   const user = await requireUser();
   const membership = await assertTreeMember(user.id, treeId);
 
@@ -35,6 +39,11 @@ export default async function TreePage({
 
   const forest = buildFamilyForest(people, parentChildren, unions);
 
+  const focusId = focusParam ?? membership.linkedPersonId ?? people[0]?.id ?? null;
+  const focusView = focusId
+    ? buildFocusView(focusId, people, parentChildren, unions)
+    : null;
+
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-4 sm:gap-8 sm:p-8">
       <div>
@@ -52,7 +61,21 @@ export default async function TreePage({
 
       <section>
         <h2 className="mb-3 font-medium">Family tree</h2>
-        <div className="overflow-x-auto rounded-md border border-gray-200 p-4">
+
+        {/* Mobile: a vertical, tap-to-recenter focus view -- a wide chart
+            needs horizontal panning on a phone regardless of styling. */}
+        <div className="sm:hidden">
+          {focusView ? (
+            <FocusFamilyView view={focusView} treeId={treeId} />
+          ) : (
+            <p className="text-sm text-gray-500">
+              No one&apos;s been added yet — add the first person below.
+            </p>
+          )}
+        </div>
+
+        {/* Desktop/tablet: the full chart, where a wide diagram works fine. */}
+        <div className="hidden overflow-x-auto rounded-md border border-gray-200 p-4 sm:block">
           <FamilyTreeView roots={forest} />
         </div>
       </section>

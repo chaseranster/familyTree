@@ -273,3 +273,61 @@ export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
 
   return { boxes, edges, width, height };
 }
+
+export interface FocusView {
+  focus: TreePerson;
+  spouses: TreePerson[];
+  parents: TreePerson[];
+  siblings: TreePerson[];
+  children: TreePerson[];
+}
+
+/**
+ * A single-person "ego view": the focus person plus their immediate
+ * relatives, with no positional layout at all -- meant for a vertical,
+ * full-width, tap-to-recenter mobile UI rather than a wide chart.
+ */
+export function buildFocusView(
+  focusId: string,
+  people: TreePerson[],
+  parentChildren: { parentId: string; childId: string }[],
+  unions: { person1Id: string; person2Id: string }[],
+): FocusView | null {
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const focus = byId.get(focusId);
+  if (!focus) return null;
+
+  const parentIds = parentChildren
+    .filter((pc) => pc.childId === focusId)
+    .map((pc) => pc.parentId);
+  const parents = parentIds
+    .map((id) => byId.get(id))
+    .filter((p): p is TreePerson => !!p);
+
+  const spouseIds = unions
+    .filter((u) => u.person1Id === focusId || u.person2Id === focusId)
+    .map((u) => (u.person1Id === focusId ? u.person2Id : u.person1Id));
+  const spouses = spouseIds
+    .map((id) => byId.get(id))
+    .filter((p): p is TreePerson => !!p);
+
+  const siblingIds = new Set<string>();
+  for (const parentId of parentIds) {
+    for (const pc of parentChildren) {
+      if (pc.parentId === parentId && pc.childId !== focusId) siblingIds.add(pc.childId);
+    }
+  }
+  const siblings = [...siblingIds]
+    .map((id) => byId.get(id))
+    .filter((p): p is TreePerson => !!p);
+
+  const childIds = new Set<string>();
+  for (const pc of parentChildren) {
+    if (pc.parentId === focusId || spouseIds.includes(pc.parentId)) childIds.add(pc.childId);
+  }
+  const children = [...childIds]
+    .map((id) => byId.get(id))
+    .filter((p): p is TreePerson => !!p);
+
+  return { focus, spouses, parents, siblings, children };
+}
