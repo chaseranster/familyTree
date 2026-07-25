@@ -62,9 +62,11 @@ export default async function TreePage({
       <section>
         <h2 className="mb-3 font-medium">Family tree</h2>
 
-        {/* Mobile: a vertical, tap-to-recenter focus view -- a wide chart
-            needs horizontal panning on a phone regardless of styling. */}
-        <div className="sm:hidden">
+        {/* Narrow OR short viewports (including landscape phones -- wide
+            enough to pass a width-only check, but too short for the chart
+            to fit a single row): the vertical, tap-to-recenter focus view.
+            See .tree-focus-view / .tree-chart-view in globals.css. */}
+        <div className="tree-focus-view">
           {focusView ? (
             <FocusFamilyView view={focusView} treeId={treeId} />
           ) : (
@@ -74,8 +76,8 @@ export default async function TreePage({
           )}
         </div>
 
-        {/* Desktop/tablet: the full chart, where a wide diagram works fine. */}
-        <div className="hidden overflow-x-auto rounded-md border border-gray-200 p-4 sm:block">
+        {/* Wide AND tall viewports (desktop, tablets): the full chart. */}
+        <div className="tree-chart-view overflow-x-auto rounded-md border border-gray-200 p-4">
           <FamilyTreeView roots={forest} />
         </div>
       </section>
