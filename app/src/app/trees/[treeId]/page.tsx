@@ -4,9 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { createInvite } from "@/app/actions/invites";
 import { createPerson } from "@/app/actions/people";
 import { createParentChild, createUnion } from "@/app/actions/relationships";
-import { buildFamilyForest, buildFocusView, personLabel } from "@/lib/family-tree";
-import { FamilyTreeView } from "./FamilyTreeView";
+import { buildFamilyForest, buildFocusView, personLabel, toSafeForest } from "@/lib/family-tree";
+import { FamilyTreeCanvas } from "./FamilyTreeCanvas";
 import { FocusFamilyView } from "./FocusFamilyView";
+import { TreeViewTabs } from "./TreeViewTabs";
 
 export default async function TreePage({
   params,
@@ -62,24 +63,20 @@ export default async function TreePage({
       <section>
         <h2 className="mb-3 font-medium">Family tree</h2>
 
-        {/* Narrow OR short viewports (including landscape phones -- wide
-            enough to pass a width-only check, but too short for the chart
-            to fit a single row): the vertical, tap-to-recenter focus view.
-            See .tree-focus-view / .tree-chart-view in globals.css. */}
-        <div className="tree-focus-view">
-          {focusView ? (
-            <FocusFamilyView view={focusView} treeId={treeId} />
-          ) : (
-            <p className="text-sm text-gray-500">
-              No one&apos;s been added yet — add the first person below.
-            </p>
-          )}
-        </div>
-
-        {/* Wide AND tall viewports (desktop, tablets): the full chart. */}
-        <div className="tree-chart-view overflow-x-auto rounded-md border border-gray-200 p-4">
-          <FamilyTreeView roots={forest} />
-        </div>
+        {forest.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            No one&apos;s been added yet — add the first person below.
+          </p>
+        ) : (
+          <TreeViewTabs
+            chart={<FamilyTreeCanvas forest={toSafeForest(forest)} />}
+            list={
+              focusView ? (
+                <FocusFamilyView view={focusView} treeId={treeId} />
+              ) : null
+            }
+          />
+        )}
       </section>
 
       <section className="rounded-md border border-gray-200 p-4">

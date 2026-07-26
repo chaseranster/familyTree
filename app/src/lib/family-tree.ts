@@ -137,43 +137,6 @@ export const GENERATION_PALETTE: readonly string[] = [
 
 const MUTED_INK = "#898781"; // deceased avatar fill -- status conveyed by text too, never color alone
 
-export interface OrgChartBox {
-  id: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  name: string;
-  subLabel: string;
-  initial: string;
-  accentColor: string;
-  avatarColor: string;
-  isLiving: boolean;
-}
-
-export interface OrgChartEdge {
-  id: string;
-  kind: "parent-child" | "spouse";
-  path: string;
-}
-
-export interface OrgChartLayout {
-  boxes: OrgChartBox[];
-  edges: OrgChartEdge[];
-  width: number;
-  height: number;
-}
-
-const BOX_HEIGHT = 92;
-const ROW_HEIGHT = 160;
-const SLOT_WIDTH = 152;
-const CARD_GAP = 14;
-const PADDING = 24;
-
-function personsInUnit(node: FamilyTreeNode): TreePerson[] {
-  return [node.person, ...node.spouses];
-}
-
 function subLabelFor(p: TreePerson): string {
   if (!p.isLiving) {
     return p.deathDate ? `d. ${p.deathDate.getFullYear()}` : "deceased";
@@ -185,26 +148,140 @@ function subLabelFor(p: TreePerson): string {
 }
 
 /**
- * Lays out a family forest as an org-chart: one horizontal row per
- * generation, one card per person (spouses sit side by side, joined by a
- * short connector), elbow connectors from each couple's midpoint down to
- * their children. Simple midpoint tree layout (not full Reingold-Tilford)
- * -- fine for the branching factors a family tree actually has.
+ * A person with ONLY display-safe fields -- no raw lastName/birthDate/
+ * maidenName. Consent-gating (docs/adr/0003) must happen before data ever
+ * reaches client-side JS, not just before it's rendered: a Client
+ * Component's props are serialized to the browser as plain JSON, so unlike
+ * a Server Component (whose internal computation never leaves the server),
+ * anything passed to one is inspectable by the user it's about. The
+ * interactive canvas below needs to run its pan/zoom/collapse logic
+ * client-side, so the values themselves must already be redacted by the
+ * time they get there -- this type is the boundary that guarantees that.
  */
-export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
+export interface SafePerson {
+  id: string;
+  displayName: string;
+  subLabel: string;
+  initial: string;
+  isLiving: boolean;
+}
+
+export interface SafeTreeNode {
+  person: SafePerson;
+  spouses: SafePerson[];
+  children: SafeTreeNode[];
+  /** Total people in this node's subtree (children + their spouses,
+   * recursively) -- safe to expose as a bare count for a collapse badge. */
+  descendantCount: number;
+}
+
+function toSafePerson(p: TreePerson): SafePerson {
+  return {
+    id: p.id,
+    displayName: personName(p),
+    subLabel: subLabelFor(p),
+    initial: p.firstName.charAt(0).toUpperCase() || "?",
+    isLiving: p.isLiving,
+  };
+}
+
+function countDescendants(node: FamilyTreeNode): number {
+  let n = 0;
+  for (const child of node.children) {
+    n += 1 + child.spouses.length + countDescendants(child);
+  }
+  return n;
+}
+
+/** Converts a forest of real Person data into the display-safe shape that's
+ * allowed to reach client-side JS (see SafePerson doc comment). Call this
+ * server-side, once, before handing data to a Client Component. */
+export function toSafeForest(roots: FamilyTreeNode[]): SafeTreeNode[] {
+  function convert(node: FamilyTreeNode): SafeTreeNode {
+    return {
+      person: toSafePerson(node.person),
+      spouses: node.spouses.map(toSafePerson),
+      children: node.children.map(convert),
+      descendantCount: countDescendants(node),
+    };
+  }
+  return roots.map(convert);
+}
+
+export interface CanvasBox {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  displayName: string;
+  subLabel: string;
+  initial: string;
+  accentColor: string;
+  avatarColor: string;
+}
+
+export interface CanvasEdge {
+  id: string;
+  kind: "parent-child" | "spouse";
+  path: string;
+}
+
+export interface CanvasToggle {
+  id: string;
+  x: number;
+  y: number;
+  collapsed: boolean;
+  hiddenCount: number;
+  /** Names of the couple/person this toggle collapses, for an accessible label. */
+  label: string;
+}
+
+export interface CanvasLayout {
+  boxes: CanvasBox[];
+  edges: CanvasEdge[];
+  toggles: CanvasToggle[];
+  width: number;
+  height: number;
+}
+
+const BOX_HEIGHT = 92;
+const ROW_HEIGHT = 160;
+const SLOT_WIDTH = 152;
+const CARD_GAP = 14;
+const PADDING = 24;
+const TOGGLE_OFFSET = 24;
+const TOGGLE_RADIUS = 12;
+
+function safePersonsInUnit(node: SafeTreeNode): SafePerson[] {
+  return [node.person, ...node.spouses];
+}
+
+/**
+ * Same midpoint-tree layout as the old static org chart, but collapse-aware:
+ * a node in `collapsed` renders its own card plus a toggle badge, but its
+ * children are excluded from both the layout math and the output -- that's
+ * what lets an interactive canvas stay navigable at 100+ people, where a
+ * single static chart would not.
+ */
+export function layoutCanvas(
+  roots: SafeTreeNode[],
+  collapsed: ReadonlySet<string>,
+): CanvasLayout {
   let cursor = 0;
   let maxDepth = 0;
-  const centers = new Map<string, { unitX: number; depth: number; node: FamilyTreeNode }>();
+  const centers = new Map<string, { unitX: number; depth: number; node: SafeTreeNode }>();
 
-  function visit(node: FamilyTreeNode, depth: number): number {
+  function visit(node: SafeTreeNode, depth: number): number {
     maxDepth = Math.max(maxDepth, depth);
+    const visibleChildren = collapsed.has(node.person.id) ? [] : node.children;
     let unitX: number;
-    if (node.children.length === 0) {
-      const w = personsInUnit(node).length;
+    if (visibleChildren.length === 0) {
+      const w = safePersonsInUnit(node).length;
       unitX = cursor + w / 2;
       cursor += w;
     } else {
-      const childXs = node.children.map((c) => visit(c, depth + 1));
+      const childXs = visibleChildren.map((c) => visit(c, depth + 1));
       unitX = (Math.min(...childXs) + Math.max(...childXs)) / 2;
     }
     centers.set(node.person.id, { unitX, depth, node });
@@ -213,11 +290,12 @@ export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
 
   for (const root of roots) visit(root, 0);
 
-  const boxes: OrgChartBox[] = [];
-  const edges: OrgChartEdge[] = [];
+  const boxes: CanvasBox[] = [];
+  const edges: CanvasEdge[] = [];
+  const toggles: CanvasToggle[] = [];
 
   for (const { unitX, depth, node } of centers.values()) {
-    const persons = personsInUnit(node);
+    const persons = safePersonsInUnit(node);
     const unitLeftSlot = unitX - persons.length / 2;
     const unitPxLeft = PADDING + unitLeftSlot * SLOT_WIDTH;
     const y = PADDING + depth * ROW_HEIGHT;
@@ -231,12 +309,11 @@ export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
         y,
         width: SLOT_WIDTH - CARD_GAP,
         height: BOX_HEIGHT,
-        name: personName(p),
-        subLabel: subLabelFor(p),
-        initial: p.firstName.charAt(0).toUpperCase() || "?",
+        displayName: p.displayName,
+        subLabel: p.subLabel,
+        initial: p.initial,
         accentColor,
         avatarColor: p.isLiving ? accentColor : MUTED_INK,
-        isLiving: p.isLiving,
       });
     });
 
@@ -251,28 +328,44 @@ export function layoutOrgChart(roots: FamilyTreeNode[]): OrgChartLayout {
       });
     }
 
+    if (node.children.length === 0) continue;
+
+    const isCollapsed = collapsed.has(node.person.id);
     const unionCenterX = PADDING + unitX * SLOT_WIDTH;
     const unionBottomY = y + BOX_HEIGHT;
 
-    for (const child of node.children) {
-      const childInfo = centers.get(child.person.id);
-      if (!childInfo) continue;
-      const childCenterX = PADDING + childInfo.unitX * SLOT_WIDTH;
-      const childTopY = PADDING + childInfo.depth * ROW_HEIGHT;
-      const midY = (unionBottomY + childTopY) / 2;
-      edges.push({
-        id: `${node.person.id}-${child.person.id}`,
-        kind: "parent-child",
-        path: `M ${unionCenterX} ${unionBottomY} V ${midY} H ${childCenterX} V ${childTopY}`,
-      });
+    toggles.push({
+      id: node.person.id,
+      x: unionCenterX,
+      y: unionBottomY + TOGGLE_OFFSET,
+      collapsed: isCollapsed,
+      hiddenCount: node.descendantCount,
+      label: persons.map((p) => p.displayName).join(" & "),
+    });
+
+    if (!isCollapsed) {
+      for (const child of node.children) {
+        const childInfo = centers.get(child.person.id);
+        if (!childInfo) continue;
+        const childCenterX = PADDING + childInfo.unitX * SLOT_WIDTH;
+        const childTopY = PADDING + childInfo.depth * ROW_HEIGHT;
+        const midY = (unionBottomY + childTopY) / 2;
+        edges.push({
+          id: `${node.person.id}-${child.person.id}`,
+          kind: "parent-child",
+          path: `M ${unionCenterX} ${unionBottomY} V ${midY} H ${childCenterX} V ${childTopY}`,
+        });
+      }
     }
   }
 
   const width = PADDING * 2 + Math.max(cursor, 1) * SLOT_WIDTH;
-  const height = PADDING * 2 + maxDepth * ROW_HEIGHT + BOX_HEIGHT;
+  const height = PADDING * 2 + maxDepth * ROW_HEIGHT + BOX_HEIGHT + TOGGLE_OFFSET + TOGGLE_RADIUS;
 
-  return { boxes, edges, width, height };
+  return { boxes, edges, toggles, width, height };
 }
+
+export { TOGGLE_RADIUS };
 
 export interface FocusView {
   focus: TreePerson;
